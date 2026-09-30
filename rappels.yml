@@ -1,0 +1,67 @@
+# Coach Fonte : envoie les rappels de séance sur ton téléphone.
+# Secrets à créer (Settings > Secrets and variables > Actions) : VAPID_PRIVATE et CF_CODE.
+name: Rappels Coach Fonte
+
+on:
+  schedule:
+    - cron: '7 * * * *'   # toutes les heures ; le script n'envoie qu'à l'heure et aux jours choisis dans l'app
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Envoyer une notification de test maintenant'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  rappel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Installer web-push
+        run: npm install web-push@3 --no-save --no-package-lock --silent
+      - name: Envoyer le rappel
+        env:
+          CF_CODE: ${{ secrets.CF_CODE }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          VAPID_PUBLIC: BPAatJJunjFzn94Kdz4O_I1MwfZpMDn_vfZAONjZP6xHz8c65nLL2Ln-sGVpt0xpUAXOG_YsCx7X5WT_RWq1D7w
+          FORCE: ${{ inputs.test == true }}
+        run: |
+          node - <<'JS'
+          const webpush = require('web-push');
+          const { CF_CODE, VAPID_PRIVATE, VAPID_PUBLIC, FORCE } = process.env;
+          if (!CF_CODE || !VAPID_PRIVATE) { console.log('Il manque le secret CF_CODE ou VAPID_PRIVATE.'); process.exit(1); }
+          let cfg;
+          try { cfg = JSON.parse(Buffer.from(CF_CODE.trim(), 'base64').toString('utf8')); }
+          catch (e) { console.log('Le secret CF_CODE est invalide : recopie-le depuis l\'app (Profil > Rappels de séance).'); process.exit(1); }
+          const force = FORCE === 'true';
+          const tz = cfg.tz || 'Europe/Paris';
+          const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: tz, weekday: 'short', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date()).map(p => [p.type, p.value]));
+          const wd = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[parts.weekday];
+          const hour = parseInt(parts.hour, 10);
+          console.log(`Heure locale (${tz}) : jour ${wd}, ${hour} h. Rappels : jours ${cfg.d}, ${cfg.h} h.`);
+          if (!force && !(cfg.d.includes(wd) && hour === cfg.h)) { console.log('Pas de rappel à envoyer maintenant.'); process.exit(0); }
+          webpush.setVapidDetails('https://bubbgum.github.io/coach-fonte/', VAPID_PUBLIC, VAPID_PRIVATE);
+          webpush.sendNotification(cfg.s, JSON.stringify({ type: force ? 'test' : 'seance' }), { TTL: 3 * 3600, urgency: 'high' })
+            .then(() => console.log(force ? 'Notification de test envoyée.' : 'Rappel envoyé.'))
+            .catch(err => {
+              if (err.statusCode === 404 || err.statusCode === 410) console.log('Abonnement expiré : réactive les rappels dans l\'app et recolle le nouveau code dans CF_CODE.');
+              else console.log('Erreur d\'envoi :', err.statusCode, err.body || err.message);
+              process.exit(1);
+            });
+          JS
+      # GitHub met en pause les tâches planifiées après 60 jours sans activité : un petit commit mensuel l'évite.
+      - name: Garder les rappels actifs
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date -u +%d%H)" = "0103" ]; then
+            git config user.name "coach-fonte-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "Maintien des rappels"
+            git push
+          fi
